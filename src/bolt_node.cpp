@@ -295,11 +295,19 @@ void BoltNode::publish_static_tf()
     tfs.push_back(make_identity_tf(_cfg.base_frame_id, "camera_depth_optical_frame"));
     if (calib.has_depth && calib.has_color)
     {
+        // ROS TF (parent=depth_optical, child=color_optical) requires T_{depth <- color} = inv(depth_to_color).
+        const float* r = calib.depth_to_color.rotation;  // column-major: r[col*3 + row]
+        const float* t = calib.depth_to_color.translation;
+        const float r_inv[9] = {
+            r[0], r[3], r[6],
+            r[1], r[4], r[7],
+            r[2], r[5], r[8],
+        };
         geometry_msgs::msg::TransformStamped tf = make_identity_tf("camera_depth_optical_frame", "camera_color_optical_frame");
-        tf.transform.translation.x = calib.depth_to_color.translation[0];
-        tf.transform.translation.y = calib.depth_to_color.translation[1];
-        tf.transform.translation.z = calib.depth_to_color.translation[2];
-        const Quaternion q = rotation_matrix_to_quaternion(calib.depth_to_color.rotation);
+        tf.transform.translation.x = -(static_cast<double>(r[0]) * t[0] + static_cast<double>(r[1]) * t[1] + static_cast<double>(r[2]) * t[2]);
+        tf.transform.translation.y = -(static_cast<double>(r[3]) * t[0] + static_cast<double>(r[4]) * t[1] + static_cast<double>(r[5]) * t[2]);
+        tf.transform.translation.z = -(static_cast<double>(r[6]) * t[0] + static_cast<double>(r[7]) * t[1] + static_cast<double>(r[8]) * t[2]);
+        const Quaternion q = rotation_matrix_to_quaternion(r_inv);
         tf.transform.rotation.x = q.x;
         tf.transform.rotation.y = q.y;
         tf.transform.rotation.z = q.z;
