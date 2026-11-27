@@ -32,7 +32,7 @@ void main()
     if (c0.z <= 0.0)
         return;
 
-    vec2 px0 = project_point_to_pixel(calib.color_intrin, c0);
+    vec2 px0 = project_point_to_pixel(calib.color_intrin, c0, false);
     int cw = calib.color_intrin.width;
     int ch = calib.color_intrin.height;
     int x0 = int(px0.x + 0.5);
@@ -52,7 +52,7 @@ void main()
     if (c1.z <= 0.0)
         return;
 
-    vec2 px1 = project_point_to_pixel(calib.color_intrin, c1);
+    vec2 px1 = project_point_to_pixel(calib.color_intrin, c1, false);
     int x1 = int(px1.x + 0.5);
     int y1 = int(px1.y + 0.5);
 

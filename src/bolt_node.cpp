@@ -5,7 +5,6 @@
 #include <sensor_msgs/image_encodings.hpp>
 
 #include <cmath>
-#include <cstring>
 
 namespace realsense_qcom_bolt
 {
@@ -32,27 +31,35 @@ BoltNode::BoltNode(const rclcpp::NodeOptions& options)
                 _cfg.use_qirp_transport ? "ON" : "OFF",
                 _cfg.qirp_dmabuf_pool_size);
 
+    _imu_sync = std::make_unique<ImuSynchronizer>(_cfg.unite_imu_method);
+
     _capture = std::make_unique<RealSenseCapture>(_cfg, _preset);
     _capture->open();
-
-    const rclcpp::QoS qos(rclcpp::KeepLast(10));
-    _output = std::make_unique<OutputBackend>(
-        *this, _cfg.use_qirp_transport, _cfg.qirp_dmabuf_pool_size, qos);
-    setup_publishers();
 
     if (preset_uses_vulkan(_preset))
     {
         _vk_ctx = std::make_unique<VulkanContext>();
         RCLCPP_INFO(this->get_logger(),
-                    "Vulkan 1.3 Compute initialized on '%s' (dmabuf_import=%s)",
+                    "Vulkan 1.3 Compute initialized on '%s' (dmabuf_import=%s, atom=%luB)",
                     _vk_ctx->device_name().c_str(),
-                    _vk_ctx->supports_dmabuf_import() ? "YES" : "NO");
-        _vk_pipeline = std::make_unique<VulkanPipeline>(
-            *_vk_ctx, _preset, _cfg, _capture->calibration(), *_output);
+                    _vk_ctx->supports_dmabuf_import() ? "YES" : "NO",
+                    static_cast<unsigned long>(_vk_ctx->non_coherent_atom_size()));
     }
     else
     {
         RCLCPP_INFO(this->get_logger(), "P0_bypass_only active: Vulkan context not initialized (0 VRAM).");
+    }
+
+    const rclcpp::QoS qos(rclcpp::KeepLast(10));
+    _output = std::make_unique<OutputBackend>(
+        *this, _cfg.use_qirp_transport, _cfg.qirp_dmabuf_pool_size, qos, _vk_ctx.get());
+    setup_publishers();
+    init_camera_info_templates();
+
+    if (_vk_ctx)
+    {
+        _vk_pipeline = std::make_unique<VulkanPipeline>(
+            *_vk_ctx, _preset, _cfg, _capture->calibration(), *_output);
     }
 
     if (_cfg.publish_tf)
@@ -67,32 +74,33 @@ BoltNode::BoltNode(const rclcpp::NodeOptions& options)
             bool changed = false;
             for (const auto& p : params)
             {
-                if (p.get_name() == "clipping_distance")
+                const auto& name = p.get_name();
+                if (name == param_keys::kClippingDistance)
                 {
                     _dyn_params.max_depth_m = static_cast<float>(p.as_double());
                     changed = true;
                 }
-                else if (p.get_name() == "min_depth_m")
+                else if (name == param_keys::kMinDepthM)
                 {
                     _dyn_params.min_depth_m = static_cast<float>(p.as_double());
                     changed = true;
                 }
-                else if (p.get_name() == "gpu_filter.bilateral_sigma_spatial")
+                else if (name == param_keys::kBilateralSigmaSpatial)
                 {
                     _dyn_params.bilateral_sigma_spatial = static_cast<float>(p.as_double());
                     changed = true;
                 }
-                else if (p.get_name() == "gpu_filter.bilateral_sigma_range")
+                else if (name == param_keys::kBilateralSigmaRange)
                 {
                     _dyn_params.bilateral_sigma_range = static_cast<float>(p.as_double());
                     changed = true;
                 }
-                else if (p.get_name() == "gpu_filter.temporal_alpha")
+                else if (name == param_keys::kTemporalAlpha)
                 {
                     _dyn_params.temporal_alpha = static_cast<float>(p.as_double());
                     changed = true;
                 }
-                else if (p.get_name() == "gpu_filter.temporal_delta")
+                else if (name == param_keys::kTemporalDelta)
                 {
                     _dyn_params.temporal_delta_m = static_cast<float>(p.as_double());
                     changed = true;
@@ -177,14 +185,14 @@ void BoltNode::declare_parameters()
     _cfg.qirp_dmabuf_pool_size = static_cast<std::size_t>(
         this->declare_parameter<int>("qirp_dmabuf_pool_size", static_cast<int>(defaults::kDefaultPoolSize), pool_desc));
 
-    // Dynamic filter constants (Push Constants, runtime mutable)
-    _dyn_params.max_depth_m = static_cast<float>(this->declare_parameter<double>("clipping_distance", -1.0));
-    _dyn_params.min_depth_m = static_cast<float>(this->declare_parameter<double>("min_depth_m", 0.10));
-    _dyn_params.bilateral_sigma_spatial = static_cast<float>(this->declare_parameter<double>("gpu_filter.bilateral_sigma_spatial", 2.0));
-    _dyn_params.bilateral_sigma_range = static_cast<float>(this->declare_parameter<double>("gpu_filter.bilateral_sigma_range", 0.05));
-    _dyn_params.temporal_alpha = static_cast<float>(this->declare_parameter<double>("gpu_filter.temporal_alpha", 0.4));
-    _dyn_params.temporal_delta_m = static_cast<float>(this->declare_parameter<double>("gpu_filter.temporal_delta", 0.05));
-    _dyn_params.rotation_deg = this->declare_parameter<int>("rotation_deg", 0, make_ro_desc("Image rotation (0/90/180/270)"));
+    // Dynamic filter constants (Push Constants / Calib UBO, runtime mutable)
+    _dyn_params.max_depth_m = static_cast<float>(this->declare_parameter<double>(param_keys::kClippingDistance, -1.0));
+    _dyn_params.min_depth_m = static_cast<float>(this->declare_parameter<double>(param_keys::kMinDepthM, 0.10));
+    _dyn_params.bilateral_sigma_spatial = static_cast<float>(this->declare_parameter<double>(param_keys::kBilateralSigmaSpatial, 2.0));
+    _dyn_params.bilateral_sigma_range = static_cast<float>(this->declare_parameter<double>(param_keys::kBilateralSigmaRange, 0.05));
+    _dyn_params.temporal_alpha = static_cast<float>(this->declare_parameter<double>(param_keys::kTemporalAlpha, 0.4));
+    _dyn_params.temporal_delta_m = static_cast<float>(this->declare_parameter<double>(param_keys::kTemporalDelta, 0.05));
+    _dyn_params.rotation_deg = this->declare_parameter<int>("rotation_deg", 0, make_ro_desc("Image rotation (only 0 supported)"));
     _cfg.initial_filter_params = _dyn_params;
 }
 
@@ -215,15 +223,58 @@ void BoltNode::setup_publishers()
         _output->create_pointcloud_publisher(pc_topic);
     }
     if (_cfg.enable_infra1)
+    {
         _output->create_infra_publisher(1, "~/infra1/image_rect_raw");
+        _infra1_info_pub = this->create_publisher<sensor_msgs::msg::CameraInfo>("~/infra1/camera_info", info_qos);
+    }
     if (_cfg.enable_infra2)
+    {
         _output->create_infra_publisher(2, "~/infra2/image_rect_raw");
+        _infra2_info_pub = this->create_publisher<sensor_msgs::msg::CameraInfo>("~/infra2/camera_info", info_qos);
+    }
     if (_cfg.enable_gyro)
         _gyro_pub = this->create_publisher<sensor_msgs::msg::Imu>("~/gyro/sample", info_qos);
     if (_cfg.enable_accel)
         _accel_pub = this->create_publisher<sensor_msgs::msg::Imu>("~/accel/sample", info_qos);
     if (_cfg.unite_imu_method != UniteImuMethod::NONE && _cfg.enable_gyro && _cfg.enable_accel)
         _imu_pub = this->create_publisher<sensor_msgs::msg::Imu>("~/imu", info_qos);
+}
+
+sensor_msgs::msg::CameraInfo BoltNode::build_camera_info_template(const rs2_intrinsics& intrin,
+                                                                  const std::string& frame_id)
+{
+    sensor_msgs::msg::CameraInfo ci;
+    ci.header.frame_id = frame_id;
+    ci.width = static_cast<uint32_t>(intrin.width);
+    ci.height = static_cast<uint32_t>(intrin.height);
+    ci.distortion_model = "plumb_bob";
+    ci.d.assign(intrin.coeffs, intrin.coeffs + 5);
+    ci.k = {intrin.fx, 0.0, intrin.ppx, 0.0, intrin.fy, intrin.ppy, 0.0, 0.0, 1.0};
+    ci.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+    ci.p = {intrin.fx, 0.0, intrin.ppx, 0.0, 0.0, intrin.fy, intrin.ppy, 0.0, 0.0, 0.0, 1.0, 0.0};
+    return ci;
+}
+
+void BoltNode::init_camera_info_templates()
+{
+    const auto& calib = _capture->calibration();
+    if (calib.has_color)
+    {
+        _color_info_tpl = build_camera_info_template(calib.color_intrin, _cfg.tf_prefix + "camera_color_optical_frame");
+        _aligned_info_tpl = _color_info_tpl;
+    }
+    if (calib.has_depth)
+    {
+        _depth_info_tpl = build_camera_info_template(calib.depth_intrin, _cfg.tf_prefix + "camera_depth_optical_frame");
+    }
+    if (calib.has_infra1)
+    {
+        _infra1_info_tpl = build_camera_info_template(calib.infra1_intrin, _cfg.tf_prefix + "camera_infra1_optical_frame");
+    }
+    if (calib.has_infra2)
+    {
+        _infra2_info_tpl = build_camera_info_template(calib.infra2_intrin, _cfg.tf_prefix + "camera_infra2_optical_frame");
+    }
 }
 
 void BoltNode::publish_static_tf()
@@ -248,6 +299,11 @@ void BoltNode::publish_static_tf()
         tf.transform.translation.x = calib.depth_to_color.translation[0];
         tf.transform.translation.y = calib.depth_to_color.translation[1];
         tf.transform.translation.z = calib.depth_to_color.translation[2];
+        const Quaternion q = rotation_matrix_to_quaternion(calib.depth_to_color.rotation);
+        tf.transform.rotation.x = q.x;
+        tf.transform.rotation.y = q.y;
+        tf.transform.rotation.z = q.z;
+        tf.transform.rotation.w = q.w;
         tfs.push_back(tf);
     }
     _tf_broadcaster->sendTransform(tfs);
@@ -260,30 +316,11 @@ rclcpp::Time BoltNode::frame_to_ros_time(const rs2::frame& f) const
     return rclcpp::Time(ns, this->get_clock()->get_clock_type());
 }
 
-sensor_msgs::msg::CameraInfo BoltNode::make_camera_info(const rs2_intrinsics& intrin,
-                                                        const std::string& frame_id,
-                                                        const rclcpp::Time& stamp) const
-{
-    sensor_msgs::msg::CameraInfo ci;
-    ci.header.stamp = stamp;
-    ci.header.frame_id = frame_id;
-    ci.width = static_cast<uint32_t>(intrin.width);
-    ci.height = static_cast<uint32_t>(intrin.height);
-    ci.distortion_model = "plumb_bob";
-    ci.d.assign(intrin.coeffs, intrin.coeffs + 5);
-    ci.k = {intrin.fx, 0.0, intrin.ppx, 0.0, intrin.fy, intrin.ppy, 0.0, 0.0, 1.0};
-    ci.r = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-    ci.p = {intrin.fx, 0.0, intrin.ppx, 0.0, 0.0, intrin.fy, intrin.ppy, 0.0, 0.0, 0.0, 1.0, 0.0};
-    return ci;
-}
-
 void BoltNode::on_frameset(const rs2::frameset& fs)
 {
     rs2::video_frame color_frame = fs.get_color_frame();
     rs2::depth_frame depth_frame = fs.get_depth_frame();
 
-    // Use unified frameset timestamp across Color, Aligned Depth, and PointCloud
-    // to match realsense2_camera and satisfy ROS 2 ExactTime message_filters.
     const rclcpp::Time fs_stamp = frame_to_ros_time(fs);
 
     std_msgs::msg::Header color_hdr;
@@ -322,46 +359,62 @@ void BoltNode::on_frameset(const rs2::frameset& fs)
             depth_frame ? depth_hdr : color_hdr);
     }
 
-    // Independent IR1/IR2 passthrough
+    // Independent IR1/IR2 passthrough + cached CameraInfo
     for (int idx : {1, 2})
     {
-        if (!_output->has_infra_subscribers(idx))
-            continue;
         rs2::video_frame ir = fs.get_infrared_frame(idx);
         if (!ir)
             continue;
-        std_msgs::msg::Header ir_hdr;
-        ir_hdr.frame_id = _cfg.tf_prefix + "camera_infra" + std::to_string(idx) + "_optical_frame";
-        ir_hdr.stamp = frame_to_ros_time(ir);
-        const bool is_y16 = (ir.get_profile().format() == RS2_FORMAT_Y16);
-        _output->publish_infra_from_cpu(
-            idx, ir_hdr, ir.get_width(), ir.get_height(),
-            is_y16 ? sensor_msgs::image_encodings::MONO16 : sensor_msgs::image_encodings::MONO8,
-            is_y16 ? 2 : 1, ir.get_data());
+        if (_output->has_infra_subscribers(idx))
+        {
+            std_msgs::msg::Header ir_hdr;
+            ir_hdr.frame_id = _cfg.tf_prefix + "camera_infra" + std::to_string(idx) + "_optical_frame";
+            ir_hdr.stamp = fs_stamp;
+            const bool is_y16 = (ir.get_profile().format() == RS2_FORMAT_Y16);
+            _output->publish_infra_from_cpu(
+                idx, ir_hdr, ir.get_width(), ir.get_height(),
+                is_y16 ? sensor_msgs::image_encodings::MONO16 : sensor_msgs::image_encodings::MONO8,
+                is_y16 ? 2 : 1, ir.get_data());
+        }
+        auto& info_pub = (idx == 1) ? _infra1_info_pub : _infra2_info_pub;
+        auto& info_tpl = (idx == 1) ? _infra1_info_tpl : _infra2_info_tpl;
+        if (info_pub && info_pub->get_subscription_count() > 0 && info_tpl.width > 0)
+        {
+            info_tpl.header.stamp = fs_stamp;
+            info_pub->publish(info_tpl);
+        }
     }
 
-    // CameraInfo
-    const auto& calib = _capture->calibration();
+    // Cached CameraInfo publishing (zero per-frame heap allocations)
     if (_color_info_pub && color_frame && _color_info_pub->get_subscription_count() > 0)
-        _color_info_pub->publish(make_camera_info(calib.color_intrin, color_hdr.frame_id, color_hdr.stamp));
+    {
+        _color_info_tpl.header.stamp = color_hdr.stamp;
+        _color_info_pub->publish(_color_info_tpl);
+    }
     if (_depth_info_pub && depth_frame && _depth_info_pub->get_subscription_count() > 0)
-        _depth_info_pub->publish(make_camera_info(calib.depth_intrin, depth_hdr.frame_id, depth_hdr.stamp));
+    {
+        _depth_info_tpl.header.stamp = depth_hdr.stamp;
+        _depth_info_pub->publish(_depth_info_tpl);
+    }
     if (_aligned_info_pub && color_frame && _aligned_info_pub->get_subscription_count() > 0)
-        _aligned_info_pub->publish(make_camera_info(calib.color_intrin, color_hdr.frame_id, color_hdr.stamp));
+    {
+        _aligned_info_tpl.header.stamp = depth_hdr.stamp;
+        _aligned_info_pub->publish(_aligned_info_tpl);
+    }
 }
 
 void BoltNode::on_motion(const rs2::motion_frame& mf)
 {
     const auto st = mf.get_profile().stream_type();
     const rs2_vector v = mf.get_motion_data();
+    const double ts_ms = mf.get_timestamp();
     const rclcpp::Time stamp = frame_to_ros_time(mf);
 
     if (st == RS2_STREAM_ACCEL)
     {
         {
             std::lock_guard<std::mutex> lk(_imu_mtx);
-            _last_accel = v;
-            _has_accel = true;
+            _imu_sync->push_accel(ImuSample{ts_ms, v.x, v.y, v.z});
         }
         if (_accel_pub && _accel_pub->get_subscription_count() > 0)
         {
@@ -388,18 +441,22 @@ void BoltNode::on_motion(const rs2::motion_frame& mf)
         }
         if (_imu_pub && _imu_pub->get_subscription_count() > 0)
         {
-            std::lock_guard<std::mutex> lk(_imu_mtx);
-            if (_has_accel)
+            std::optional<UnitedImuSample> united;
+            {
+                std::lock_guard<std::mutex> lk(_imu_mtx);
+                united = _imu_sync->push_gyro(ImuSample{ts_ms, v.x, v.y, v.z});
+            }
+            if (united.has_value())
             {
                 sensor_msgs::msg::Imu msg;
                 msg.header.stamp = stamp;
                 msg.header.frame_id = _cfg.tf_prefix + "camera_imu_optical_frame";
-                msg.angular_velocity.x = v.x;
-                msg.angular_velocity.y = v.y;
-                msg.angular_velocity.z = v.z;
-                msg.linear_acceleration.x = _last_accel.x;
-                msg.linear_acceleration.y = _last_accel.y;
-                msg.linear_acceleration.z = _last_accel.z;
+                msg.angular_velocity.x = united->gx;
+                msg.angular_velocity.y = united->gy;
+                msg.angular_velocity.z = united->gz;
+                msg.linear_acceleration.x = united->ax;
+                msg.linear_acceleration.y = united->ay;
+                msg.linear_acceleration.z = united->az;
                 _imu_pub->publish(msg);
             }
         }

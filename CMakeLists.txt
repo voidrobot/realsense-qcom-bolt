@@ -117,12 +117,29 @@ install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch)
 
 if(BUILD_TESTING)
+  enable_testing()
+
   add_executable(test_config_router test/test_config_router.cpp src/config.cpp)
   target_include_directories(test_config_router PRIVATE include)
+  add_test(NAME test_config_router COMMAND test_config_router)
 
   add_executable(test_dmabuf_pool test/test_dmabuf_pool.cpp)
   target_include_directories(test_dmabuf_pool PRIVATE include)
   target_link_libraries(test_dmabuf_pool pthread)
+  add_test(NAME test_dmabuf_pool COMMAND test_dmabuf_pool)
+
+  add_executable(test_math_and_imu test/test_math_and_imu.cpp)
+  target_include_directories(test_math_and_imu PRIVATE include)
+  add_test(NAME test_math_and_imu COMMAND test_math_and_imu)
+
+  add_executable(test_vulkan_kernels
+    test/test_vulkan_kernels.cpp
+    src/vulkan_context.cpp
+    ${GENERATED_SHADER_HEADERS}
+  )
+  target_include_directories(test_vulkan_kernels PRIVATE include "${SHADER_OUT_DIR}")
+  target_link_libraries(test_vulkan_kernels Vulkan::Vulkan)
+  add_test(NAME test_vulkan_kernels COMMAND test_vulkan_kernels)
 endif()
 
 ament_package()

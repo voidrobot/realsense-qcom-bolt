@@ -34,16 +34,18 @@ PointCloudFieldsMeta make_pointcloud_fields_meta(bool has_rgb)
 OutputBackend::OutputBackend(rclcpp::Node& node,
                              bool use_qirp_transport,
                              std::size_t qirp_pool_size,
-                             const rclcpp::QoS& qos)
+                             const rclcpp::QoS& qos,
+                             VulkanContext* vk_ctx)
     : _node(node),
       _use_qirp(use_qirp_transport),
-      _qos(qos)
+      _qos(qos),
+      _vk_ctx(vk_ctx)
 #ifdef BUILD_WITH_QIRP
       ,
       _color_pool(qirp_pool_size, defaults::kDefaultDmaHeapPath,
-                  [this](const lib_mem_dmabuf::DmaBuffer& b) { notify_dmabuf_discard(b.fd()); }),
+                  [this](const lib_mem_dmabuf::DmaBuffer& b) { evict_dmabuf_fd(b.fd()); }),
       _pc_pool(qirp_pool_size, defaults::kDefaultDmaHeapPath,
-               [this](const lib_mem_dmabuf::DmaBuffer& b) { notify_dmabuf_discard(b.fd()); })
+               [this](const lib_mem_dmabuf::DmaBuffer& b) { evict_dmabuf_fd(b.fd()); })
 #endif
 {
 #ifndef BUILD_WITH_QIRP
@@ -52,30 +54,17 @@ OutputBackend::OutputBackend(rclcpp::Node& node,
 #endif
 }
 
-void OutputBackend::set_dmabuf_discard_callback(std::function<void(int)> cb)
+OutputBackend::~OutputBackend()
 {
 #ifdef BUILD_WITH_QIRP
-    std::lock_guard<std::mutex> lock(_discard_mtx);
-    _on_dmabuf_discard = std::move(cb);
-#else
-    (void)cb;
-#endif
-}
-
-#ifdef BUILD_WITH_QIRP
-void OutputBackend::notify_dmabuf_discard(int fd)
-{
-    if (fd < 0)
-        return;
-    std::function<void(int)> cb;
+    if (_vk_ctx && _vk_ctx->device() != VK_NULL_HANDLE)
     {
-        std::lock_guard<std::mutex> lock(_discard_mtx);
-        cb = _on_dmabuf_discard;
+        vkDeviceWaitIdle(_vk_ctx->device());
     }
-    if (cb)
-        cb(fd);
-}
+    std::lock_guard<std::mutex> lock(_dmabuf_cache_mtx);
+    _dmabuf_vk_cache.clear();
 #endif
+}
 
 void OutputBackend::create_color_publisher(const std::string& topic)
 {
@@ -189,8 +178,8 @@ void OutputBackend::publish_color_from_cpu(const std_msgs::msg::Header& header,
 {
     if (!rgb8_data || width <= 0 || height <= 0)
         return;
-    const int row_bytes = width * 3;
-    if (src_step < row_bytes)
+    const std::size_t row_bytes = static_cast<std::size_t>(width) * 3u;
+    if (static_cast<std::size_t>(src_step) < row_bytes)
         return;
 
 #ifdef BUILD_WITH_QIRP
@@ -198,7 +187,7 @@ void OutputBackend::publish_color_from_cpu(const std_msgs::msg::Header& header,
     {
         const int dst_stride = color_output_stride(width);
         const std::size_t align_bytes = color_output_bytes(width, height);
-        if (dst_stride < row_bytes ||
+        if (dst_stride < static_cast<int>(row_bytes) ||
             static_cast<std::size_t>(height) * static_cast<std::size_t>(dst_stride) > align_bytes)
         {
             return;
@@ -208,23 +197,17 @@ void OutputBackend::publish_color_from_cpu(const std_msgs::msg::Header& header,
             return;
 
         dmabuf->sync_start();
-        auto* dst = static_cast<uint8_t*>(dmabuf->addr());
-        const auto* src = static_cast<const uint8_t*>(rgb8_data);
-        if (dst_stride == row_bytes && src_step == row_bytes)
-        {
-            std::memcpy(dst, src, static_cast<std::size_t>(height) * static_cast<std::size_t>(row_bytes));
-        }
-        else
-        {
-            for (int y = 0; y < height; ++y)
-            {
-                std::memcpy(dst + static_cast<std::size_t>(y) * static_cast<std::size_t>(dst_stride),
-                            src + static_cast<std::size_t>(y) * static_cast<std::size_t>(src_step),
-                            static_cast<std::size_t>(row_bytes));
-            }
-        }
+        copy_image_2d(dmabuf->addr(), static_cast<std::size_t>(dst_stride),
+                      rgb8_data, static_cast<std::size_t>(src_step), row_bytes, height);
         dmabuf->sync_end();
-        publish_color_dmabuf(header, width, height, std::move(dmabuf));
+
+        auto msg = std::make_unique<qrb_ros::transport::type::Image>();
+        msg->header = header;
+        msg->width = width;
+        msg->height = height;
+        msg->encoding = sensor_msgs::image_encodings::RGB8;
+        msg->dmabuf = std::move(dmabuf);
+        _qirp_color_pub->publish(std::move(msg));
         return;
     }
 #endif
@@ -238,21 +221,8 @@ void OutputBackend::publish_color_from_cpu(const std_msgs::msg::Header& header,
     msg->encoding = sensor_msgs::image_encodings::RGB8;
     msg->is_bigendian = 0;
     msg->step = static_cast<uint32_t>(row_bytes);
-    msg->data.resize(static_cast<std::size_t>(height) * static_cast<std::size_t>(row_bytes));
-    if (src_step == row_bytes)
-    {
-        std::memcpy(msg->data.data(), rgb8_data, msg->data.size());
-    }
-    else
-    {
-        const auto* src = static_cast<const uint8_t*>(rgb8_data);
-        for (int y = 0; y < height; ++y)
-        {
-            std::memcpy(msg->data.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(row_bytes),
-                        src + static_cast<std::size_t>(y) * static_cast<std::size_t>(src_step),
-                        static_cast<std::size_t>(row_bytes));
-        }
-    }
+    msg->data.resize(static_cast<std::size_t>(height) * row_bytes);
+    copy_image_2d(msg->data.data(), row_bytes, rgb8_data, static_cast<std::size_t>(src_step), row_bytes, height);
     _std_color_pub->publish(std::move(msg));
 }
 
@@ -330,53 +300,197 @@ void OutputBackend::publish_pointcloud_from_cpu(const std_msgs::msg::Header& hea
 }
 
 #ifdef BUILD_WITH_QIRP
-std::shared_ptr<lib_mem_dmabuf::DmaBuffer> OutputBackend::acquire_color_dmabuf(int width, int height)
+VkBuffer OutputBackend::get_or_import_dmabuf(int fd, std::size_t bytes)
 {
-    return _color_pool.acquire(color_output_bytes(width, height));
+    std::lock_guard<std::mutex> lock(_dmabuf_cache_mtx);
+    auto it = _dmabuf_vk_cache.find(fd);
+    if (it != _dmabuf_vk_cache.end() && it->second.size() >= bytes)
+    {
+        return it->second.buffer();
+    }
+    if (it != _dmabuf_vk_cache.end())
+    {
+        _dmabuf_vk_cache.erase(it);
+    }
+    ScopedVulkanBuffer imported = _vk_ctx->import_dmabuf_buffer(fd, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    VkBuffer handle = imported.buffer();
+    _dmabuf_vk_cache.emplace(fd, std::move(imported));
+    return handle;
 }
 
-std::shared_ptr<lib_mem_dmabuf::DmaBuffer> OutputBackend::acquire_pointcloud_dmabuf(std::size_t bytes)
+void OutputBackend::evict_dmabuf_fd(int fd)
 {
-    return _pc_pool.acquire(bytes);
-}
-
-void OutputBackend::publish_color_dmabuf(const std_msgs::msg::Header& header,
-                                         int width,
-                                         int height,
-                                         std::shared_ptr<lib_mem_dmabuf::DmaBuffer> dmabuf)
-{
-    if (!_qirp_color_pub || !dmabuf)
+    if (fd < 0)
         return;
-    auto msg = std::make_unique<qrb_ros::transport::type::Image>();
-    msg->header = header;
-    msg->width = width;
-    msg->height = height;
-    msg->encoding = sensor_msgs::image_encodings::RGB8;
-    msg->dmabuf = std::move(dmabuf);
-    _qirp_color_pub->publish(std::move(msg));
-}
-
-void OutputBackend::publish_pointcloud_dmabuf(const std_msgs::msg::Header& header,
-                                              uint32_t width,
-                                              uint32_t height,
-                                              bool is_dense,
-                                              const PointCloudFieldsMeta& meta,
-                                              std::shared_ptr<lib_mem_dmabuf::DmaBuffer> dmabuf)
-{
-    if (!_qirp_pc_pub || !dmabuf)
-        return;
-    auto msg = std::make_unique<qrb_ros::transport::type::PointCloud2>();
-    msg->header = header;
-    msg->width = width;
-    msg->height = height;
-    msg->fields = meta.fields;
-    msg->is_bigendian = false;
-    msg->point_step = meta.point_step;
-    msg->row_step = width * meta.point_step;
-    msg->is_dense = is_dense;
-    msg->data_fd = std::move(dmabuf);
-    _qirp_pc_pub->publish(std::move(msg));
+    std::lock_guard<std::mutex> lock(_dmabuf_cache_mtx);
+    _dmabuf_vk_cache.erase(fd);
 }
 #endif
+
+GpuOutputSlot OutputBackend::acquire_gpu_color_slot(int width, int height)
+{
+    GpuOutputSlot slot;
+    if (!_vk_ctx || width <= 0 || height <= 0)
+        return slot;
+
+    const std::size_t bytes = color_output_bytes(width, height);
+#ifdef BUILD_WITH_QIRP
+    if (_use_qirp)
+    {
+        auto dmabuf = _color_pool.acquire(bytes);
+        if (!dmabuf || dmabuf->fd() < 0)
+            return slot;
+        slot.vk_buffer = get_or_import_dmabuf(dmabuf->fd(), static_cast<std::size_t>(dmabuf->size()));
+        slot.cpu_ptr = dmabuf->addr();
+        slot.size = static_cast<std::size_t>(dmabuf->size());
+        slot.is_dmabuf = true;
+        slot.lease = std::move(dmabuf);
+        return slot;
+    }
+#endif
+
+    if (!_std_rgb_buf.valid() || _std_rgb_buf.size() < bytes)
+    {
+        _std_rgb_buf = _vk_ctx->create_buffer(
+            bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    }
+    slot.vk_buffer = _std_rgb_buf.buffer();
+    slot.cpu_ptr = _std_rgb_buf.mapped();
+    slot.size = bytes;
+    slot.is_dmabuf = false;
+    return slot;
+}
+
+void OutputBackend::upload_cpu_rgb_to_slot(GpuOutputSlot& slot, int width, int height, const void* rgb8_data)
+{
+    if (!slot.valid() || !slot.cpu_ptr || !rgb8_data || width <= 0 || height <= 0)
+        return;
+
+    const std::size_t row_bytes = static_cast<std::size_t>(width) * 3u;
+    const std::size_t dst_stride = static_cast<std::size_t>(color_output_stride(width));
+
+#ifdef BUILD_WITH_QIRP
+    if (slot.is_dmabuf && slot.lease)
+    {
+        auto dmabuf = std::static_pointer_cast<lib_mem_dmabuf::DmaBuffer>(slot.lease);
+        dmabuf->sync_start();
+        copy_image_2d(slot.cpu_ptr, dst_stride, rgb8_data, row_bytes, row_bytes, height);
+        dmabuf->sync_end();
+        return;
+    }
+#endif
+
+    copy_image_2d(slot.cpu_ptr, dst_stride, rgb8_data, row_bytes, row_bytes, height);
+    if (_vk_ctx && _std_rgb_buf.valid())
+    {
+        _vk_ctx->flush_buffer(_std_rgb_buf.get());
+    }
+}
+
+void OutputBackend::publish_gpu_color_slot(const std_msgs::msg::Header& header,
+                                           int width,
+                                           int height,
+                                           GpuOutputSlot&& slot,
+                                           bool gpu_written)
+{
+    if (!slot.valid() || !has_color_subscribers())
+        return;
+
+#ifdef BUILD_WITH_QIRP
+    if (slot.is_dmabuf && _qirp_color_pub && slot.lease)
+    {
+        auto dmabuf = std::static_pointer_cast<lib_mem_dmabuf::DmaBuffer>(std::move(slot.lease));
+        // GPU L2 visibility is guaranteed by cmd_host_read_barrier + vkWaitForFences;
+        // per Linux DMA-BUF contract, CPU sync_start/sync_end is owned by CPU readers/writers only.
+        auto msg = std::make_unique<qrb_ros::transport::type::Image>();
+        msg->header = header;
+        msg->width = width;
+        msg->height = height;
+        msg->encoding = sensor_msgs::image_encodings::RGB8;
+        msg->dmabuf = std::move(dmabuf);
+        _qirp_color_pub->publish(std::move(msg));
+        return;
+    }
+#endif
+
+    if (gpu_written && _vk_ctx && _std_rgb_buf.valid())
+    {
+        _vk_ctx->invalidate_buffer(_std_rgb_buf.get());
+    }
+    publish_color_from_cpu(header, width, height, color_output_stride(width), slot.cpu_ptr);
+}
+
+GpuOutputSlot OutputBackend::acquire_gpu_pointcloud_slot(std::size_t max_bytes)
+{
+    GpuOutputSlot slot;
+    if (!_vk_ctx || max_bytes == 0)
+        return slot;
+
+#ifdef BUILD_WITH_QIRP
+    if (_use_qirp)
+    {
+        auto dmabuf = _pc_pool.acquire(max_bytes);
+        if (!dmabuf || dmabuf->fd() < 0)
+            return slot;
+        slot.vk_buffer = get_or_import_dmabuf(dmabuf->fd(), static_cast<std::size_t>(dmabuf->size()));
+        slot.cpu_ptr = dmabuf->addr();
+        slot.size = static_cast<std::size_t>(dmabuf->size());
+        slot.is_dmabuf = true;
+        slot.lease = std::move(dmabuf);
+        return slot;
+    }
+#endif
+
+    if (!_std_pc_buf.valid() || _std_pc_buf.size() < max_bytes)
+    {
+        _std_pc_buf = _vk_ctx->create_buffer(
+            max_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    }
+    slot.vk_buffer = _std_pc_buf.buffer();
+    slot.cpu_ptr = _std_pc_buf.mapped();
+    slot.size = max_bytes;
+    slot.is_dmabuf = false;
+    return slot;
+}
+
+void OutputBackend::publish_gpu_pointcloud_slot(const std_msgs::msg::Header& header,
+                                                uint32_t width,
+                                                uint32_t height,
+                                                bool is_dense,
+                                                const PointCloudFieldsMeta& meta,
+                                                GpuOutputSlot&& slot)
+{
+    if (!slot.valid() || width == 0 || height == 0 || !has_pointcloud_subscribers())
+        return;
+
+#ifdef BUILD_WITH_QIRP
+    if (slot.is_dmabuf && _qirp_pc_pub && slot.lease)
+    {
+        auto dmabuf = std::static_pointer_cast<lib_mem_dmabuf::DmaBuffer>(std::move(slot.lease));
+        auto msg = std::make_unique<qrb_ros::transport::type::PointCloud2>();
+        msg->header = header;
+        msg->width = width;
+        msg->height = height;
+        msg->fields = meta.fields;
+        msg->is_bigendian = false;
+        msg->point_step = meta.point_step;
+        msg->row_step = width * meta.point_step;
+        msg->is_dense = is_dense;
+        msg->data_fd = std::move(dmabuf);
+        _qirp_pc_pub->publish(std::move(msg));
+        return;
+    }
+#endif
+
+    const std::size_t valid_bytes =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * meta.point_step;
+    if (_vk_ctx && _std_pc_buf.valid())
+    {
+        _vk_ctx->invalidate_buffer(_std_pc_buf.get(), 0, valid_bytes);
+    }
+    publish_pointcloud_from_cpu(header, width, height, is_dense, meta, slot.cpu_ptr, valid_bytes);
+}
 
 }  // namespace realsense_qcom_bolt

@@ -143,7 +143,26 @@ int main()
         c.pointcloud_enable = true;
         c.pointcloud_coord_frame = PointCloudCoordFrame::COLOR;
         expect_throws(c, "color coord_frame without align_depth");
+
+        c.pointcloud_enable = false;
+        c.pointcloud_coord_frame = PointCloudCoordFrame::DEPTH;
+        c.initial_filter_params.rotation_deg = 90;
+        expect_throws(c, "unsupported rotation_deg=90 Fail-Fast");
+
+        c.initial_filter_params.rotation_deg = 180;
+        expect_throws(c, "unsupported rotation_deg=180 Fail-Fast");
+
+        c.initial_filter_params.rotation_deg = 0;
+        c.enable_depth = false;
+        c.gpu_bilateral_enable = true;
+        expect_throws(c, "gpu filter without depth");
     }
+
+    assert(parse_coord_frame("depth") == PointCloudCoordFrame::DEPTH);
+    assert(parse_coord_frame("COLOR") == PointCloudCoordFrame::COLOR);
+    assert(parse_unite_imu_method("copy") == UniteImuMethod::COPY);
+    assert(parse_unite_imu_method("linear_interpolation") == UniteImuMethod::LINEAR_INTERPOLATION);
+    assert(parse_unite_imu_method("none") == UniteImuMethod::NONE);
 
     std::cout << "ALL_CONFIG_ROUTER_TESTS_PASSED" << std::endl;
     return 0;

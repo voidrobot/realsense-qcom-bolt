@@ -93,10 +93,10 @@ PipelinePreset resolve_pipeline_preset(const NodeConfig& cfg)
     }
 
     const int rot = cfg.initial_filter_params.rotation_deg;
-    if (rot != 0 && rot != 90 && rot != 180 && rot != 270)
+    if (rot != 0)
     {
         throw std::invalid_argument("Unsupported rotation_deg: " + std::to_string(rot) +
-                                    " (supported: 0, 90, 180, 270)");
+                                    " (only 0 is supported in realsense_qcom_bolt; Fail-Fast)");
     }
 
     // Validate contradictory stream/processing combinations (Fail-Fast)

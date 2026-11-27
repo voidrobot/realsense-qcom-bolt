@@ -12,20 +12,11 @@ layout(std430, binding = 2) readonly buffer CalibBuf { CalibData calib; };
 layout(std430, binding = 3) writeonly buffer PcOut { uvec4 pc_out[]; };
 layout(std430, binding = 4) buffer CounterBuf { uint valid_count[]; };
 
-shared uint s_wg_count;
-shared uint s_wg_base;
+BOLT_DECLARE_COMPACTION_SHARED
 
 void main()
 {
-    if (ORDERED_PC == 0u && gl_LocalInvocationIndex == 0u)
-    {
-        s_wg_count = 0u;
-        s_wg_base = 0u;
-    }
-    if (ORDERED_PC == 0u)
-    {
-        barrier();
-    }
+    BOLT_COMPACTION_INIT(ORDERED_PC)
 
     uint x = gl_GlobalInvocationID.x;
     uint y = gl_GlobalInvocationID.y;
@@ -44,8 +35,7 @@ void main()
             float z_m = float(raw_z) * calib.depth_scale;
             vec3 pt = deproject_pixel_to_point(calib.color_intrin, vec2(float(x), float(y)), z_m);
             uint byte_off = y * calib.color_stride_bytes + x * 3u;
-            uint widx = byte_off >> 2u;
-            uvec3 rgb = read_rgb8_pixel(byte_off, rgb_in[widx], rgb_in[widx + 1u]);
+            uvec3 rgb = BOLT_LOAD_RGB8(rgb_in, byte_off);
             uint bgr = pack_rgb_as_ros_bgr(rgb);
             out_pt = uvec4(floatBitsToUint(pt.x), floatBitsToUint(pt.y), floatBitsToUint(pt.z), bgr);
             valid = true;
@@ -61,21 +51,9 @@ void main()
         return;
     }
 
-    uint local_idx = 0u;
+    BOLT_COMPACTION_RESERVE(valid, valid_count, dst_idx)
     if (valid)
     {
-        local_idx = atomicAdd(s_wg_count, 1u);
-    }
-    barrier();
-
-    if (gl_LocalInvocationIndex == 0u && s_wg_count > 0u)
-    {
-        s_wg_base = atomicAdd(valid_count[0], s_wg_count);
-    }
-    barrier();
-
-    if (valid)
-    {
-        pc_out[s_wg_base + local_idx] = out_pt;
+        pc_out[dst_idx] = out_pt;
     }
 }

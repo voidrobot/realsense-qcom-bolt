@@ -12,8 +12,17 @@ namespace defaults
 inline constexpr std::size_t kDefaultPoolSize = 8;
 inline constexpr std::size_t kMaxPoolSize = 32;
 inline constexpr const char* kDefaultDmaHeapPath = "/dev/dma_heap/system";
-inline constexpr uint32_t kStagingRingSlots = 3;
 }  // namespace defaults
+
+namespace param_keys
+{
+inline constexpr const char* kClippingDistance = "clipping_distance";
+inline constexpr const char* kMinDepthM = "min_depth_m";
+inline constexpr const char* kBilateralSigmaSpatial = "gpu_filter.bilateral_sigma_spatial";
+inline constexpr const char* kBilateralSigmaRange = "gpu_filter.bilateral_sigma_range";
+inline constexpr const char* kTemporalAlpha = "gpu_filter.temporal_alpha";
+inline constexpr const char* kTemporalDelta = "gpu_filter.temporal_delta";
+}  // namespace param_keys
 
 enum class PipelinePreset : uint8_t
 {

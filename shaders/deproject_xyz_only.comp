@@ -10,20 +10,11 @@ layout(std430, binding = 1) readonly buffer CalibBuf { CalibData calib; };
 layout(std430, binding = 2) writeonly buffer PcOut { float pc_out[]; };
 layout(std430, binding = 3) buffer CounterBuf { uint valid_count[]; };
 
-shared uint s_wg_count;
-shared uint s_wg_base;
+BOLT_DECLARE_COMPACTION_SHARED
 
 void main()
 {
-    if (ORDERED_PC == 0u && gl_LocalInvocationIndex == 0u)
-    {
-        s_wg_count = 0u;
-        s_wg_base = 0u;
-    }
-    if (ORDERED_PC == 0u)
-    {
-        barrier();
-    }
+    BOLT_COMPACTION_INIT(ORDERED_PC)
 
     uint x = gl_GlobalInvocationID.x;
     uint y = gl_GlobalInvocationID.y;
@@ -60,22 +51,10 @@ void main()
         return;
     }
 
-    uint local_idx = 0u;
+    BOLT_COMPACTION_RESERVE(valid, valid_count, dst_idx)
     if (valid)
     {
-        local_idx = atomicAdd(s_wg_count, 1u);
-    }
-    barrier();
-
-    if (gl_LocalInvocationIndex == 0u && s_wg_count > 0u)
-    {
-        s_wg_base = atomicAdd(valid_count[0], s_wg_count);
-    }
-    barrier();
-
-    if (valid)
-    {
-        uint base = (s_wg_base + local_idx) * 3u;
+        uint base = dst_idx * 3u;
         pc_out[base] = pt.x;
         pc_out[base + 1u] = pt.y;
         pc_out[base + 2u] = pt.z;

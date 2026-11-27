@@ -1,19 +1,20 @@
 #pragma once
 
 #include "realsense_qcom_bolt/config.hpp"
+#include "realsense_qcom_bolt/math_utils.hpp"
 #include "realsense_qcom_bolt/vulkan_pipeline.hpp"
 
 #include <librealsense2/rs.hpp>
 
 #include <atomic>
 #include <functional>
-#include <memory>
 #include <thread>
 
 namespace realsense_qcom_bolt
 {
 
 // Thin librealsense2 capture driver (NO host processing_blocks in P1..P6).
+// Separates video pipeline from asynchronous high-rate motion (IMU) pipeline on live cameras.
 class RealSenseCapture
 {
 public:
@@ -37,10 +38,17 @@ private:
     PipelinePreset _preset;
     rs2::pipeline _pipe;
     rs2::pipeline_profile _profile;
+    bool _video_started{false};
+
+    rs2::pipeline _imu_pipe;
+    bool _imu_separate{false};
+    bool _imu_started{false};
+
     StreamCalibration _calib;
 
-    std::atomic<bool> _running{false};
+    alignas(kCacheLineBytes) std::atomic<bool> _running{false};
     std::thread _worker;
+    MotionCallback _motion_cb;
 };
 
 }  // namespace realsense_qcom_bolt
