@@ -1,0 +1,75 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common_math.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer DepthIn { uint depth_in[]; };
+layout(std430, binding = 1) readonly buffer CalibBuf { CalibData calib; };
+layout(std430, binding = 2) buffer ZBuf { uint zbuf[]; };
+
+void main()
+{
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint dw = uint(calib.depth_intrin.width);
+    uint dh = uint(calib.depth_intrin.height);
+    if (x >= dw || y >= dh)
+        return;
+
+    uint idx = y * dw + x;
+    uint word = depth_in[idx >> 1u];
+    uint raw_z = ((idx & 1u) == 0u) ? (word & 0xFFFFu) : (word >> 16u);
+    if (raw_z == 0u)
+        return;
+
+    float z_m = float(raw_z) * calib.depth_scale;
+    if (z_m < calib.min_depth_m || (calib.max_depth_m > 0.0 && z_m > calib.max_depth_m))
+        return;
+
+    vec3 p0 = deproject_pixel_to_point(calib.depth_intrin, vec2(float(x) - 0.5, float(y) - 0.5), z_m);
+    vec3 c0 = transform_point_to_point(calib.depth_to_color, p0);
+    if (c0.z <= 0.0)
+        return;
+
+    vec2 px0 = project_point_to_pixel(calib.color_intrin, c0);
+    int cw = calib.color_intrin.width;
+    int ch = calib.color_intrin.height;
+    int x0 = int(px0.x + 0.5);
+    int y0 = int(px0.y + 0.5);
+
+    if (calib.align_fill_2x2 == 0u)
+    {
+        if (x0 >= 0 && x0 < cw && y0 >= 0 && y0 < ch)
+        {
+            atomicMin(zbuf[uint(y0) * uint(cw) + uint(x0)], raw_z);
+        }
+        return;
+    }
+
+    vec3 p1 = deproject_pixel_to_point(calib.depth_intrin, vec2(float(x) + 0.5, float(y) + 0.5), z_m);
+    vec3 c1 = transform_point_to_point(calib.depth_to_color, p1);
+    if (c1.z <= 0.0)
+        return;
+
+    vec2 px1 = project_point_to_pixel(calib.color_intrin, c1);
+    int x1 = int(px1.x + 0.5);
+    int y1 = int(px1.y + 0.5);
+
+    int min_x = max(0, min(x0, x1));
+    int max_x = min(cw - 1, max(x0, x1));
+    int min_y = max(0, min(y0, y1));
+    int max_y = min(ch - 1, max(y0, y1));
+
+    if ((max_x - min_x) > 16 || (max_y - min_y) > 16)
+        return;
+
+    for (int cy = min_y; cy <= max_y; ++cy)
+    {
+        uint row = uint(cy) * uint(cw);
+        for (int cx = min_x; cx <= max_x; ++cx)
+        {
+            atomicMin(zbuf[row + uint(cx)], raw_z);
+        }
+    }
+}

@@ -1,0 +1,23 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer ZBuf { uint zbuf[]; };
+layout(std430, binding = 1) writeonly buffer AlignedOut { uint aligned_z16[]; };
+
+layout(push_constant) uniform PushConsts
+{
+    uint pair_count;  // (color_width * color_height) / 2
+} pc;
+
+void main()
+{
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.pair_count)
+        return;
+
+    uint z0 = zbuf[idx * 2u];
+    uint z1 = zbuf[idx * 2u + 1u];
+    uint o0 = (z0 == 0xFFFFFFFFu) ? 0u : (z0 & 0xFFFFu);
+    uint o1 = (z1 == 0xFFFFFFFFu) ? 0u : (z1 & 0xFFFFu);
+    aligned_z16[idx] = o0 | (o1 << 16u);
+}

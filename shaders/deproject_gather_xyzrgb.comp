@@ -1,0 +1,104 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common_math.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(constant_id = 0) const uint ORDERED_PC = 0u;
+layout(constant_id = 1) const uint ALLOW_NO_TEXTURE = 0u;
+
+layout(std430, binding = 0) readonly buffer DepthIn { uint depth_in[]; };
+layout(std430, binding = 1) readonly buffer RgbIn { uint rgb_in[]; };
+layout(std430, binding = 2) readonly buffer CalibBuf { CalibData calib; };
+layout(std430, binding = 3) writeonly buffer PcOut { uvec4 pc_out[]; };
+layout(std430, binding = 4) buffer CounterBuf { uint valid_count[]; };
+
+shared uint s_wg_count;
+shared uint s_wg_base;
+
+void main()
+{
+    if (ORDERED_PC == 0u && gl_LocalInvocationIndex == 0u)
+    {
+        s_wg_count = 0u;
+        s_wg_base = 0u;
+    }
+    if (ORDERED_PC == 0u)
+    {
+        barrier();
+    }
+
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint dw = uint(calib.depth_intrin.width);
+    uint dh = uint(calib.depth_intrin.height);
+    bool in_bounds = (x < dw && y < dh);
+
+    bool valid = false;
+    uvec4 out_pt = uvec4(0u);
+
+    if (in_bounds)
+    {
+        uint idx = y * dw + x;
+        uint word = depth_in[idx >> 1u];
+        uint raw_z = ((idx & 1u) == 0u) ? (word & 0xFFFFu) : (word >> 16u);
+        float z_m = float(raw_z) * calib.depth_scale;
+        bool z_ok = (raw_z > 0u) &&
+                    (z_m >= calib.min_depth_m) &&
+                    (calib.max_depth_m <= 0.0 || z_m <= calib.max_depth_m);
+
+        if (z_ok)
+        {
+            vec3 pt = deproject_pixel_to_point(calib.depth_intrin, vec2(float(x), float(y)), z_m);
+            vec3 cpt = transform_point_to_point(calib.depth_to_color, pt);
+            vec2 cpx = project_point_to_pixel_for_pc(calib.color_intrin, cpt);
+
+            float u = cpx.x / float(calib.color_intrin.width);
+            float v = cpx.y / float(calib.color_intrin.height);
+            bool valid_uv = (u >= 0.0 && u <= 1.0 && v >= 0.0 && v <= 1.0);
+
+            if (valid_uv || ALLOW_NO_TEXTURE != 0u || ORDERED_PC != 0u)
+            {
+                uint bgr = 0u;
+                if (valid_uv)
+                {
+                    int pixx = clamp(int(u * float(calib.color_intrin.width)), 0, calib.color_intrin.width - 1);
+                    int pixy = clamp(int(v * float(calib.color_intrin.height)), 0, calib.color_intrin.height - 1);
+                    uint byte_off = uint(pixy) * calib.color_stride_bytes + uint(pixx) * 3u;
+                    uint widx = byte_off >> 2u;
+                    uvec3 rgb = read_rgb8_pixel(byte_off, rgb_in[widx], rgb_in[widx + 1u]);
+                    bgr = pack_rgb_as_ros_bgr(rgb);
+                }
+                out_pt = uvec4(floatBitsToUint(pt.x), floatBitsToUint(pt.y), floatBitsToUint(pt.z), bgr);
+                valid = (valid_uv || ALLOW_NO_TEXTURE != 0u);
+            }
+        }
+    }
+
+    if (ORDERED_PC != 0u)
+    {
+        if (in_bounds)
+        {
+            pc_out[y * dw + x] = out_pt;
+        }
+        return;
+    }
+
+    uint local_idx = 0u;
+    if (valid)
+    {
+        local_idx = atomicAdd(s_wg_count, 1u);
+    }
+    barrier();
+
+    if (gl_LocalInvocationIndex == 0u && s_wg_count > 0u)
+    {
+        s_wg_base = atomicAdd(valid_count[0], s_wg_count);
+    }
+    barrier();
+
+    if (valid)
+    {
+        pc_out[s_wg_base + local_idx] = out_pt;
+    }
+}

@@ -1,0 +1,50 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common_math.glsl"
+
+// Processes 4 pixels per invocation (2 YUYV uint32 words -> 3 RGB8 uint32 words).
+// Requires width and dst_stride_bytes to be multiples of 4 (true for all D400 profiles & QIRP 64px stride).
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer YuyvIn { uint yuyv_data[]; };
+layout(std430, binding = 1) writeonly buffer RgbOut { uint rgb_data[]; };
+
+layout(push_constant) uniform PushConsts
+{
+    uint width;
+    uint height;
+    uint dst_stride_u32;  // dst_stride_bytes / 4
+    uint pad0;
+} pc;
+
+void main()
+{
+    uint x4 = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x4 * 4u >= pc.width || y >= pc.height)
+        return;
+
+    uint in_base = y * (pc.width >> 1u) + x4 * 2u;
+    uint p01 = yuyv_data[in_base];
+    uint p23 = yuyv_data[in_base + 1u];
+
+    uint y0 = p01 & 0xFFu;
+    uint u0 = (p01 >> 8u) & 0xFFu;
+    uint y1 = (p01 >> 16u) & 0xFFu;
+    uint v0 = (p01 >> 24u) & 0xFFu;
+
+    uint y2 = p23 & 0xFFu;
+    uint u2 = (p23 >> 8u) & 0xFFu;
+    uint y3 = (p23 >> 16u) & 0xFFu;
+    uint v2 = (p23 >> 24u) & 0xFFu;
+
+    uvec3 c0 = yuyv_to_rgb8_bt601(y0, u0, v0);
+    uvec3 c1 = yuyv_to_rgb8_bt601(y1, u0, v0);
+    uvec3 c2 = yuyv_to_rgb8_bt601(y2, u2, v2);
+    uvec3 c3 = yuyv_to_rgb8_bt601(y3, u2, v2);
+
+    uint out_base = y * pc.dst_stride_u32 + x4 * 3u;
+    rgb_data[out_base]      = c0.r | (c0.g << 8u) | (c0.b << 16u) | (c1.r << 24u);
+    rgb_data[out_base + 1u] = c1.g | (c1.b << 8u) | (c2.r << 16u) | (c2.g << 24u);
+    rgb_data[out_base + 2u] = c2.b | (c3.r << 8u) | (c3.g << 16u) | (c3.b << 24u);
+}

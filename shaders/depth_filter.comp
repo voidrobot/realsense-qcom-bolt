@@ -1,0 +1,112 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Optional GPU Depth Filter: Clipping + 5x5 Bilateral + Temporal EMA.
+// Processes 2 Z16 pixels per invocation (1 uint32 word).
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer DepthIn { uint depth_in[]; };
+layout(std430, binding = 1) buffer DepthPrev { uint depth_prev[]; };
+layout(std430, binding = 2) writeonly buffer DepthOut { uint depth_out[]; };
+
+layout(push_constant) uniform FilterPush
+{
+    uint width;
+    uint height;
+    float depth_scale;
+    float min_depth_m;
+    float max_depth_m;
+    uint enable_bilateral;
+    float sigma_spatial;
+    float sigma_range;
+    uint enable_temporal;
+    float temporal_alpha;
+    float temporal_delta_m;
+    uint has_prev;
+} pc;
+
+uint read_z16(int x, int y)
+{
+    x = clamp(x, 0, int(pc.width) - 1);
+    y = clamp(y, 0, int(pc.height) - 1);
+    uint idx = uint(y) * pc.width + uint(x);
+    uint word = depth_in[idx >> 1u];
+    return ((idx & 1u) == 0u) ? (word & 0xFFFFu) : (word >> 16u);
+}
+
+uint read_prev_z16(uint idx)
+{
+    uint word = depth_prev[idx >> 1u];
+    return ((idx & 1u) == 0u) ? (word & 0xFFFFu) : (word >> 16u);
+}
+
+uint filter_pixel(int x, int y)
+{
+    uint raw = read_z16(x, y);
+    if (raw == 0u)
+        return 0u;
+
+    float d = float(raw) * pc.depth_scale;
+    if (d < pc.min_depth_m || (pc.max_depth_m > 0.0 && d > pc.max_depth_m))
+        return 0u;
+
+    if (pc.enable_bilateral != 0u)
+    {
+        float inv_2ss = -0.5 / max(pc.sigma_spatial * pc.sigma_spatial, 1e-4);
+        float inv_2sr = -0.5 / max(pc.sigma_range * pc.sigma_range, 1e-6);
+        float sum = 0.0;
+        float wsum = 0.0;
+        for (int dy = -2; dy <= 2; ++dy)
+        {
+            for (int dx = -2; dx <= 2; ++dx)
+            {
+                uint nraw = read_z16(x + dx, y + dy);
+                if (nraw == 0u)
+                    continue;
+                float nd = float(nraw) * pc.depth_scale;
+                float dr = nd - d;
+                float w = exp(float(dx * dx + dy * dy) * inv_2ss + (dr * dr) * inv_2sr);
+                sum += nd * w;
+                wsum += w;
+            }
+        }
+        if (wsum > 0.0)
+            d = sum / wsum;
+    }
+
+    if (pc.enable_temporal != 0u && pc.has_prev != 0u)
+    {
+        uint idx = uint(y) * pc.width + uint(x);
+        uint praw = read_prev_z16(idx);
+        if (praw != 0u)
+        {
+            float pd = float(praw) * pc.depth_scale;
+            if (abs(d - pd) <= pc.temporal_delta_m)
+            {
+                d = mix(pd, d, pc.temporal_alpha);
+            }
+        }
+    }
+
+    uint out_raw = uint(clamp(round(d / pc.depth_scale), 0.0, 65535.0));
+    return out_raw;
+}
+
+void main()
+{
+    uint x2 = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x2 * 2u >= pc.width || y >= pc.height)
+        return;
+
+    int x0 = int(x2 * 2u);
+    uint z0 = filter_pixel(x0, int(y));
+    uint z1 = filter_pixel(x0 + 1, int(y));
+    uint packed = (z0 & 0xFFFFu) | ((z1 & 0xFFFFu) << 16u);
+    uint widx = y * (pc.width >> 1u) + x2;
+    depth_out[widx] = packed;
+    if (pc.enable_temporal != 0u)
+    {
+        depth_prev[widx] = packed;
+    }
+}

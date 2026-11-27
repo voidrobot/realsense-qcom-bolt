@@ -1,0 +1,18 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) writeonly buffer ZBuf { uint zbuf[]; };
+
+layout(push_constant) uniform PushConsts
+{
+    uint count;
+} pc;
+
+void main()
+{
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < pc.count)
+    {
+        zbuf[idx] = 0xFFFFFFFFu;
+    }
+}

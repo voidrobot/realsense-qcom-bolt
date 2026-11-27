@@ -1,0 +1,83 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common_math.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(constant_id = 0) const uint ORDERED_PC = 0u;
+
+layout(std430, binding = 0) readonly buffer DepthIn { uint depth_in[]; };
+layout(std430, binding = 1) readonly buffer CalibBuf { CalibData calib; };
+layout(std430, binding = 2) writeonly buffer PcOut { float pc_out[]; };
+layout(std430, binding = 3) buffer CounterBuf { uint valid_count[]; };
+
+shared uint s_wg_count;
+shared uint s_wg_base;
+
+void main()
+{
+    if (ORDERED_PC == 0u && gl_LocalInvocationIndex == 0u)
+    {
+        s_wg_count = 0u;
+        s_wg_base = 0u;
+    }
+    if (ORDERED_PC == 0u)
+    {
+        barrier();
+    }
+
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint dw = uint(calib.depth_intrin.width);
+    uint dh = uint(calib.depth_intrin.height);
+    bool in_bounds = (x < dw && y < dh);
+
+    bool valid = false;
+    vec3 pt = vec3(0.0);
+
+    if (in_bounds)
+    {
+        uint idx = y * dw + x;
+        uint word = depth_in[idx >> 1u];
+        uint raw_z = ((idx & 1u) == 0u) ? (word & 0xFFFFu) : (word >> 16u);
+        float z_m = float(raw_z) * calib.depth_scale;
+        if (raw_z > 0u && z_m >= calib.min_depth_m &&
+            (calib.max_depth_m <= 0.0 || z_m <= calib.max_depth_m))
+        {
+            pt = deproject_pixel_to_point(calib.depth_intrin, vec2(float(x), float(y)), z_m);
+            valid = true;
+        }
+    }
+
+    if (ORDERED_PC != 0u)
+    {
+        if (in_bounds)
+        {
+            uint base = (y * dw + x) * 3u;
+            pc_out[base] = pt.x;
+            pc_out[base + 1u] = pt.y;
+            pc_out[base + 2u] = pt.z;
+        }
+        return;
+    }
+
+    uint local_idx = 0u;
+    if (valid)
+    {
+        local_idx = atomicAdd(s_wg_count, 1u);
+    }
+    barrier();
+
+    if (gl_LocalInvocationIndex == 0u && s_wg_count > 0u)
+    {
+        s_wg_base = atomicAdd(valid_count[0], s_wg_count);
+    }
+    barrier();
+
+    if (valid)
+    {
+        uint base = (s_wg_base + local_idx) * 3u;
+        pc_out[base] = pt.x;
+        pc_out[base + 1u] = pt.y;
+        pc_out[base + 2u] = pt.z;
+    }
+}

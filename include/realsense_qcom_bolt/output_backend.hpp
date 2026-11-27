@@ -1,0 +1,138 @@
+#pragma once
+
+#include "realsense_qcom_bolt/config.hpp"
+#include "realsense_qcom_bolt/dmabuf_pool.hpp"
+
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_msgs/msg/header.hpp>
+
+#ifdef BUILD_WITH_QIRP
+#include <qrb_ros_transport_image_type/image.hpp>
+#include <qrb_ros_transport_image_type/image_utils.hpp>
+#include <qrb_ros_transport_point_cloud2_type/point_cloud2.hpp>
+#endif
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+namespace realsense_qcom_bolt
+{
+
+struct PointCloudFieldsMeta
+{
+    bool has_rgb{true};
+    uint32_t point_step{16};
+    std::vector<sensor_msgs::msg::PointField> fields;
+};
+
+PointCloudFieldsMeta make_pointcloud_fields_meta(bool has_rgb);
+
+// Abstraction over QIRP DMA-BUF Zero-Copy vs standard ROS 2 sensor_msgs publishers.
+class OutputBackend
+{
+public:
+    OutputBackend(rclcpp::Node& node,
+                  bool use_qirp_transport,
+                  std::size_t qirp_pool_size,
+                  const rclcpp::QoS& qos);
+
+    void create_color_publisher(const std::string& topic);
+    void create_depth_publisher(const std::string& topic);
+    void create_aligned_depth_publisher(const std::string& topic);
+    void create_pointcloud_publisher(const std::string& topic);
+    void create_infra_publisher(int index, const std::string& topic);
+
+    bool has_color_subscribers() const;
+    bool has_depth_subscribers() const;
+    bool has_aligned_depth_subscribers() const;
+    bool has_pointcloud_subscribers() const;
+    bool has_infra_subscribers(int index) const;
+
+    bool use_qirp() const { return _use_qirp; }
+
+    // Register callback invoked before a pooled/transient DMA-BUF fd is closed/unmapped.
+    void set_dmabuf_discard_callback(std::function<void(int)> cb);
+
+    // Stride & aligned size expected by the active Color output backend.
+    int color_output_stride(int width) const;
+    std::size_t color_output_bytes(int width, int height) const;
+
+    // CPU-source publishing (used by P0 bypass_only and StandardOutputBackend readback).
+    void publish_color_from_cpu(const std_msgs::msg::Header& header,
+                                int width,
+                                int height,
+                                int src_step,
+                                const void* rgb8_data);
+
+    void publish_depth_from_cpu(const std_msgs::msg::Header& header,
+                                int width,
+                                int height,
+                                const void* z16_data,
+                                bool is_aligned);
+
+    void publish_infra_from_cpu(int index,
+                                const std_msgs::msg::Header& header,
+                                int width,
+                                int height,
+                                const std::string& encoding,
+                                int bpp,
+                                const void* data);
+
+    void publish_pointcloud_from_cpu(const std_msgs::msg::Header& header,
+                                     uint32_t width,
+                                     uint32_t height,
+                                     bool is_dense,
+                                     const PointCloudFieldsMeta& meta,
+                                     const void* data,
+                                     std::size_t bytes);
+
+#ifdef BUILD_WITH_QIRP
+    // Zero-Copy DMA-BUF slot acquisition & direct publication (used by P1..P6 Vulkan pipelines).
+    std::shared_ptr<lib_mem_dmabuf::DmaBuffer> acquire_color_dmabuf(int width, int height);
+    std::shared_ptr<lib_mem_dmabuf::DmaBuffer> acquire_pointcloud_dmabuf(std::size_t bytes);
+
+    void publish_color_dmabuf(const std_msgs::msg::Header& header,
+                              int width,
+                              int height,
+                              std::shared_ptr<lib_mem_dmabuf::DmaBuffer> dmabuf);
+
+    void publish_pointcloud_dmabuf(const std_msgs::msg::Header& header,
+                                   uint32_t width,
+                                   uint32_t height,
+                                   bool is_dense,
+                                   const PointCloudFieldsMeta& meta,
+                                   std::shared_ptr<lib_mem_dmabuf::DmaBuffer> dmabuf);
+#endif
+
+private:
+    rclcpp::Node& _node;
+    bool _use_qirp{false};
+    rclcpp::QoS _qos;
+
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr _std_color_pub;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr _depth_pub;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr _aligned_depth_pub;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr _infra1_pub;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr _infra2_pub;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr _std_pc_pub;
+
+#ifdef BUILD_WITH_QIRP
+    void notify_dmabuf_discard(int fd);
+
+    std::mutex _discard_mtx;
+    std::function<void(int)> _on_dmabuf_discard;
+    rclcpp::Publisher<qrb_ros::transport::type::Image>::SharedPtr _qirp_color_pub;
+    rclcpp::Publisher<qrb_ros::transport::type::PointCloud2>::SharedPtr _qirp_pc_pub;
+    DmaBufferPool _color_pool;
+    DmaBufferPool _pc_pool;
+#endif
+};
+
+}  // namespace realsense_qcom_bolt
