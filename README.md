@@ -2,7 +2,7 @@
 
 [![ROS 2 Jazzy](https://img.shields.io/badge/ROS%202-Jazzy-22314E?style=flat-square)](https://docs.ros.org/en/jazzy/)
 [![Vulkan 1.3](https://img.shields.io/badge/Vulkan-1.3%20Compute-AC162C?style=flat-square)](https://www.vulkan.org/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square)](package.xml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square)](LICENSE)
 
 Low-latency Intel RealSense RGB-D node for Qualcomm Dragonwing platforms (Arduino VENTUNO Q, QCS8275 / Adreno 623), built on **Vulkan 1.3 Compute** and **Qualcomm QIRP DMA-BUF Zero-Copy**.
 
@@ -122,4 +122,4 @@ Each enabled image stream publishes its matching `*/camera_info`, and static opt
 
 ## License
 
-Apache-2.0. See [package.xml](package.xml).
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

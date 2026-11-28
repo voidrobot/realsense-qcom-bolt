@@ -1,3 +1,6 @@
+// Copyright 2026 voidrobot
+// SPDX-License-Identifier: Apache-2.0
+
 #include "realsense_qcom_bolt/math_utils.hpp"
 #include "realsense_qcom_bolt/vulkan_context.hpp"
 

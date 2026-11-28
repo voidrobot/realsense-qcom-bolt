@@ -1,4 +1,6 @@
 #version 450
+// Copyright 2026 voidrobot
+// SPDX-License-Identifier: Apache-2.0
 #extension GL_GOOGLE_include_directive : require
 #include "common_math.glsl"
 

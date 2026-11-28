@@ -1,3 +1,7 @@
+// Copyright 2026 voidrobot
+// SPDX-License-Identifier: Apache-2.0
+// Projection and distortion math follows Intel librealsense2 (Apache-2.0).
+
 // Shared GLSL 450 math, calibration structures, and compaction helpers for realsense_qcom_bolt.
 
 struct Intrinsics

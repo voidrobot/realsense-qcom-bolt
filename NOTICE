@@ -1,0 +1,11 @@
+realsense_qcom_bolt
+Copyright 2026 voidrobot
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This package builds on and maintains topic/parameter compatibility with
+Intel RealSense software distributed under the Apache License, Version 2.0:
+- Intel librealsense (https://github.com/IntelRealSense/librealsense)
+  Camera projection, distortion, and depth-to-color alignment math reference.
+- Intel realsense-ros (https://github.com/IntelRealSense/realsense-ros)
+  ROS 2 topic, frame, CameraInfo, and parameter naming conventions.

@@ -4,7 +4,7 @@
   <name>realsense_qcom_bolt</name>
   <version>1.0.0</version>
   <description>Fixed Vulkan 1.3 Compute RGB-D pipeline set for Intel RealSense with optional Qualcomm QIRP DMA-BUF Zero-Copy transport.</description>
-  <maintainer email="void@voidrobot.dev">void</maintainer>
+  <maintainer email="jjieureka@gmail.com">voidrobot</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
