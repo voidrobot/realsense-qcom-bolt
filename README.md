@@ -6,7 +6,7 @@
 
 Low-latency Intel RealSense RGB-D node for Qualcomm Dragonwing platforms (Arduino VENTUNO Q, QCS8275 / Adreno 623), built on **Vulkan 1.3 Compute** and **Qualcomm QIRP DMA-BUF Zero-Copy**.
 
-Arduino VENTUNO Q ships with a solid Linux and ROS 2 foundation. `realsense_qcom_bolt` builds directly on that stack by offloading YUYV unpacking, depth filtering, depth-to-color alignment, and pointcloud generation onto the Adreno GPU in a single `VkCommandBuffer`, and passing output frames directly through pre-mapped QIRP DMA-BUF file descriptors.
+The official `realsense-ros` package already provides full-featured RealSense support on ROS 2, executing its RGB-D processing pipeline on the CPU. `realsense_qcom_bolt` re-architects that core RGB-D workload into a single-submission Vulkan 1.3 Compute pipeline with Qualcomm QIRP DMA-BUF Zero-Copy, substantially reducing CPU utilization and end-to-end latency on Qualcomm Dragonwing hardware.
 
 ---
 
