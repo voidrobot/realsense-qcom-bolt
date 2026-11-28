@@ -10,16 +10,6 @@ Arduino VENTUNO Q ships with a solid Linux and ROS 2 foundation. `realsense_qcom
 
 ---
 
-## Architecture
-
-```mermaid
-flowchart LR
-    Cam["RealSense D4xx<br/>(USB 3.2 · YUYV / Z16)"] --> Cap["librealsense2<br/>Capture"]
-    Cap --> GPU["Adreno 623 · Vulkan 1.3 Compute<br/>(Single VkCommandBuffer:<br/>YUYV→RGB8 · Filter · Align · PointCloud)"]
-    GPU -->|"DMA-BUF fd<br/>(pre-mapped ring pool)"| QIRP["QIRP Zero-Copy Topics<br/>color/image_raw · points"]
-    GPU -->|"Intra-Process<br/>UniquePtr"| Std["Standard ROS 2 Topics<br/>aligned_depth · CameraInfo · TF · IMU"]
-```
-
 ### Key Characteristics
 
 - **Single-Submission GPU Pipeline**: Executes color conversion (`YUYV → RGB8`), optional depth filtering (bilateral, temporal, range clipping), depth-to-color alignment, and pointcloud deprojection in one `VkCommandBuffer` submission per frameset.
